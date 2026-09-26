@@ -17,9 +17,12 @@ def create_run(body: CreateRunRequest):
 
 
 @router.get("/{run_id}")
-def get_run(run_id: str):
+def get_run(run_id: str, member_id: str | None = None):
     try:
-        return service.resume(run_id)
+        return service.resume(run_id, member_id=member_id)
+    except service.PermissionDenied as e:
+        # 协作章节 run：非本队成员查看共享状态 -> 403（零副作用）
+        raise HTTPException(status_code=403, detail=str(e))
     except service.InvalidAction as e:
         raise HTTPException(status_code=400, detail=str(e))
 
@@ -48,6 +51,9 @@ def act(run_id: str, body: ActRequest):
 def resume(run_id: str, member_id: str | None = None):
     try:
         return service.resume(run_id, member_id=member_id)
+    except service.PermissionDenied as e:
+        # 协作章节 run：非本队成员查看共享状态 -> 403（零副作用）
+        raise HTTPException(status_code=403, detail=str(e))
     except service.InvalidAction as e:
         raise HTTPException(status_code=400, detail=str(e))
 
@@ -68,8 +74,11 @@ def check_request(run_id: str, request_id: str, member_id: str | None = None):
 
 
 @router.get("/{run_id}/replay")
-def replay(run_id: str):
+def replay(run_id: str, member_id: str | None = None):
     try:
-        return service.replay(run_id)
+        return service.replay(run_id, member_id=member_id)
+    except service.PermissionDenied as e:
+        # 协作章节 run：非本队成员查看整局回放 -> 403（零副作用）
+        raise HTTPException(status_code=403, detail=str(e))
     except service.InvalidAction as e:
         raise HTTPException(status_code=400, detail=str(e))

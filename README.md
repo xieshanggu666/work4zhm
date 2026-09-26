@@ -41,7 +41,10 @@
   开章与推进；所有成员操作的是**同一个章节 run**——同一条确定性动作日志、
   同一事务/`rev` 乐观锁/`request_id` 幂等串行化，共享章节状态并同步结算。
   权限边界在**任何状态变更之前**校验（越权 403、零副作用；前端按钮同步禁用仅为
-  体验优化，绕过后端照样拒绝），每步动作日志记录 `actor`（操作者）。击败章节
+  体验优化，绕过后端照样拒绝），每步动作日志记录 `actor`（操作者）。**读接口与
+  写动作同一权限边界**：队伍视口/协作续局/增量同步/整程回放，以及协作远征的
+  远征视口与章节 run 的 get/resume/replay，都要求 `member_id` 属于该队——
+  队伍状态、行动记录与成员贡献绝不向队外泄露（未带身份/他队成员 403）。击败章节
   首领的**协作金 +15 入共享金币池**（纯推演、进校验点、随交接快照跨章），个人
   贡献（战斗胜利/后勤操作次数）与章节/终胜名义均分（终胜 +50/人）记 `coop_ledger`；
   战败整队同事务结算 lost（只结算一次，已落袋协作金不追回），终章通关结算 won。
@@ -236,13 +239,14 @@ landed 核对只回元数据不回放首次视口且重复补交命中幂等不�
 - `POST /api/expeditions {seed?, chapters?}` 创建远征（默认 3 章）：远征记录与第 1 章 run
   在同一事务落库；返回 `{expedition, run}`，run 视口携带 `expedition` 摘要（章节进度/结算状态）。
   协作远征不直接走本接口——由队伍开赛（见下）在同一开章路径上附带 `coop_team`。
-- `GET  /api/expeditions/{id}` 远征视口 + 当前章节 run 视口（续远征入口）。
+- `GET  /api/expeditions/{id}?member_id=` 远征视口 + 当前章节 run 视口（续远征入口）。
+  协作远征要求 member_id 属于该队（越权 403）；单人远征无需身份。
 - `POST /api/expeditions/{id}/advance {request_id?}` 进入下一章：仅当远征进行中且当前章
   已通关；以交接快照（牌组/锻造/遗物/金币/生命，休整回血 25%）确定性开新章
   （章节种子由远征种子派生）。重复推进 400、已结算 409、同 request_id 返回首次响应
   （`duplicate:true`），绝不重复开章。
-- `GET  /api/expeditions/{id}/replay` 整程回放：远征事件时间线 + 逐章完整回放
-  （复用单局可交互回放，校验点逐章比对），全程只读。
+- `GET  /api/expeditions/{id}/replay?member_id=` 整程回放：远征事件时间线 + 逐章完整回放
+  （复用单局可交互回放，校验点逐章比对），全程只读。协作远征同样要求本队成员（403）。
 - 章节 run 就是普通 run（`/api/runs/{id}/act|resume|replay` 全部适用）；章节 run 结束时
   （won/lost）与行动同一事务同步远征状态：非终章通关记录 chapter_clear 交接快照，
   战败/终章通关结算远征（settle），已结算或非当前章节的重复触发直接跳过。
@@ -254,6 +258,7 @@ landed 核对只回元数据不回放首次视口且重复补交命中幂等不�
 - `POST /api/coop/teams/join {code, member_name, request_id?}` 凭码加入（仅 forming、
   最多 4 人、显示名不重复；同 request_id 幂等），响应 `me` 携带该队员的 id/token。
 - `GET  /api/coop/teams/{id}?member_id=` 队伍大厅视口（成员/角色/个人贡献战利/时间线）。
+  仅本队成员可读（未带身份/他队成员 403）。
 - `POST /api/coop/teams/{id}/roles {member_id(队长), target_id, role:combat|supply, request_id?}`
   队长分配角色（仅 forming；队长身份不可改；非队长 403；重复同角色 409）。
 - `POST /api/coop/teams/{id}/leave|disband {member_id}` 开赛前退队/解散（队长退队即解散）。
@@ -263,6 +268,7 @@ landed 核对只回元数据不回放首次视口且重复补交命中幂等不�
 - `GET  /api/coop/teams/{id}/expedition?member_id=` 协作远征续局：队伍 + 当前章节 run
   视口（`run.coop` 含成员/角色/本成员权限/奖励常量）；响应携带权威 `cursor`
   （2.10.0：run_id/run_seq/team_seq/exp_seq + rev/章节锚点），作为增量同步起点。
+  仅本队成员（403 越权）。
 - `GET  /api/coop/teams/{id}/sync?member_id=&run_id=&run_seq=&team_seq=&exp_seq=`
   断线重连与事件增量同步（2.10.0）：按客户端游标返回三条日志的增量——`actions`
   （动作事件，含录制帧 `log`/操作者/`rev`/校验点；`replay_only:true` 表示旧日志
@@ -270,10 +276,12 @@ landed 核对只回元数据不回放首次视口且重复补交命中幂等不�
   章节切换/游标错乱/落后过多/旧日志时 `reset:true` 并附全量 `run` 视口；
   动作增量非空时附最新权威视口供补播后对齐。非本队成员 403、零副作用。
 - `POST /api/coop/teams/{id}/advance {member_id, request_id?}` 仅队长推进章节（非队长 403）。
-- `GET  /api/coop/teams/{id}/replay` 协作整程回放：队伍时间线 + `ledger` 个人流水 +
-  远征事件 + 逐章可交互回放（每步 `actor` 为操作者），全程只读。
+- `GET  /api/coop/teams/{id}/replay?member_id=` 协作整程回放：队伍时间线 + `ledger`
+  个人流水 + 远征事件 + 逐章可交互回放（每步 `actor` 为操作者），全程只读。
+  仅本队成员（403 越权）。
 - 协作章节 run 的行动仍走 `POST /api/runs/{id}/act`，请求体额外带 `member_id`；
-  `/resume?member_id=` 用于高亮本成员。权限：战斗动作（play/end_turn/use_potion）
+  协作 run 的 `GET /api/runs/{id}`、`/resume`、`/replay` 同样要求
+  `?member_id=` 属于该队（越权 403、零副作用）。权限：战斗动作（play/end_turn/use_potion）
   限 leader/combat，资源动作（choose_node/claim_reward/forge/shop_buy/shop_remove/
   discard_potion/companion_set_mode/commission_accept/commission_claim/encounter_choice）
   限 leader/supply；越权 403 且零副作用，未带身份或他队成员同样 403。

@@ -53,7 +53,7 @@ def _start(client, team_id, leader_id, request_id=None):
     return client.post(f"/api/coop/teams/{team_id}/start", json=body)
 
 
-def _team(client, team_id, member_id=None):
+def _team(client, team_id, member_id):
     url = f"/api/coop/teams/{team_id}"
     if member_id:
         url += f"?member_id={member_id}"
@@ -114,7 +114,7 @@ def test_join_with_code_and_full_duplicate_rejected(client):
     full = client.post("/api/coop/teams/join",
                        json={"code": code, "member_name": "老五"})
     assert full.status_code == 400
-    t = _team(client, team["id"]).json()
+    t = _team(client, team["id"], leader_id).json()
     assert len(t["members"]) == MAX_MEMBERS
 
 
@@ -128,7 +128,7 @@ def test_join_idempotent_same_request_id(client):
     assert dup.json()["duplicate"] is True
     assert dup.json()["me"]["id"] == first.json()["me"]["id"]
     # 只入队一次
-    t = _team(client, team["id"]).json()
+    t = _team(client, team["id"], team["leader_id"]).json()
     assert len(t["members"]) == 2
 
 
@@ -175,7 +175,7 @@ def test_start_idempotent_and_creates_shared_run(client):
     # 无令牌再次开赛 -> 409
     assert _start(client, squad["team_id"], squad["leader_id"]).status_code == 409
     # 队伍已绑定远征、状态 started
-    t = _team(client, squad["team_id"]).json()
+    t = _team(client, squad["team_id"], squad["leader_id"]).json()
     assert t["status"] == "started" and t["expedition_id"] == squad["expedition_id"]
     # 开赛后加入被拒绝
     r = client.post("/api/coop/teams/join",
@@ -190,15 +190,16 @@ def _enter_node(client, run_id, member_id, node):
                              "member_id": member_id})
 
 
-def _first_encounter_node(client, run_id):
-    view = client.get(f"/api/runs/{run_id}/resume").json()
+def _first_encounter_node(client, run_id, member_id):
+    view = client.get(f"/api/runs/{run_id}/resume",
+                      params={"member_id": member_id}).json()
     return next(n["id"] for n in view["reachable"] if n["type"] == "encounter")
 
 
 def test_combat_member_cannot_move_and_supply_cannot_play(client):
     squad = _squad(client)
     rid = squad["run_id"]
-    node = _first_encounter_node(client, rid)
+    node = _first_encounter_node(client, rid, squad["leader_id"])
     # 战斗位选节点（资源动作）-> 403
     r = _enter_node(client, rid, squad["combat_id"], node)
     assert r.status_code == 403
@@ -206,7 +207,8 @@ def test_combat_member_cannot_move_and_supply_cannot_play(client):
     r = client.post(f"/api/runs/{rid}/act", json={"action": "choose_node", "node": node})
     assert r.status_code == 403
     # 零副作用：位置仍在 start
-    view = client.get(f"/api/runs/{rid}/resume").json()
+    view = client.get(f"/api/runs/{rid}/resume",
+                      params={"member_id": squad["leader_id"]}).json()
     assert view["position"] == "start" and view["in_battle"] is False
 
     # 资源位选节点（合法）-> 进入战斗
@@ -214,7 +216,8 @@ def test_combat_member_cannot_move_and_supply_cannot_play(client):
     assert r.status_code == 200 and r.json()["run"]["in_battle"] is True
 
     # 资源位打牌（战斗动作）-> 403 且不消耗能量/手牌
-    before = client.get(f"/api/runs/{rid}/resume").json()
+    before = client.get(f"/api/runs/{rid}/resume",
+                        params={"member_id": squad["supply_id"]}).json()
     energy_before = before["battle"]["energy"]
     hand_size_before = len(before["battle"]["hand"])
     card = before["battle"]["hand"][0]
@@ -223,7 +226,8 @@ def test_combat_member_cannot_move_and_supply_cannot_play(client):
                     json={"action": "play", "card": uid,
                           "member_id": squad["supply_id"]})
     assert r.status_code == 403
-    after = client.get(f"/api/runs/{rid}/resume").json()
+    after = client.get(f"/api/runs/{rid}/resume",
+                       params={"member_id": squad["supply_id"]}).json()
     assert after["battle"]["energy"] == energy_before
     assert len(after["battle"]["hand"]) == hand_size_before
 
@@ -237,11 +241,12 @@ def test_combat_member_cannot_move_and_supply_cannot_play(client):
 def test_leader_can_do_both_domains(client):
     squad = _squad(client)
     rid = squad["run_id"]
-    node = _first_encounter_node(client, rid)
+    node = _first_encounter_node(client, rid, squad["leader_id"])
     # 队长选节点（资源）
     r = _enter_node(client, rid, squad["leader_id"], node)
     assert r.status_code == 200
-    view = client.get(f"/api/runs/{rid}/resume").json()
+    view = client.get(f"/api/runs/{rid}/resume",
+                      params={"member_id": squad["leader_id"]}).json()
     card = view["battle"]["hand"][0]
     uid = card["uid"] if isinstance(card, dict) else card
     # 队长打牌（战斗）
@@ -255,7 +260,7 @@ def test_foreign_member_and_end_state_permissions(client):
     # 两支队伍：A 队成员不能操作 B 队的章节 run
     a = _squad(client, seed=1)
     b = _squad(client, seed=2)
-    node = _first_encounter_node(client, a["run_id"])
+    node = _first_encounter_node(client, a["run_id"], a["leader_id"])
     r = _enter_node(client, a["run_id"], b["leader_id"], node)
     assert r.status_code == 403
     # 伪造成员 id 同样 403
@@ -275,7 +280,8 @@ def test_supply_resource_action_403_has_zero_side_effects(client):
     rec["state"]["position"] = row_above
     db.save_run(rid, rec["state"]["status"], rec["state"]["position"], rec["state"])
     assert _enter_node(client, rid, squad["supply_id"], shop_node).status_code == 200
-    view = client.get(f"/api/runs/{rid}/resume").json()
+    view = client.get(f"/api/runs/{rid}/resume",
+                      params={"member_id": squad["supply_id"]}).json()
     sku = view["shop"]["cards"][0]["sku"]
     gold_before = view["gold"]
     # 战斗位购买 -> 403
@@ -283,7 +289,8 @@ def test_supply_resource_action_403_has_zero_side_effects(client):
                     json={"action": "shop_buy", "kind": "card", "sku": sku,
                           "member_id": squad["combat_id"]})
     assert r.status_code == 403
-    after = client.get(f"/api/runs/{rid}/resume").json()
+    after = client.get(f"/api/runs/{rid}/resume",
+                       params={"member_id": squad["supply_id"]}).json()
     assert after["gold"] == gold_before
     assert after["shop"]["cards"][0]["sold"] is False
 
@@ -292,7 +299,7 @@ def test_supply_resource_action_403_has_zero_side_effects(client):
 def test_members_share_run_and_rev_conflicts(client):
     squad = _squad(client)
     rid = squad["run_id"]
-    node = _first_encounter_node(client, rid)
+    node = _first_encounter_node(client, rid, squad["supply_id"])
     r = _enter_node(client, rid, squad["supply_id"], node)
     rev = r.json()["rev"]
     # 资源位立刻再选节点（战斗中）本就非法；这里用并发版本号验证：
@@ -306,7 +313,7 @@ def test_members_share_run_and_rev_conflicts(client):
 def test_request_id_idempotent_with_member_actions(client):
     squad = _squad(client)
     rid = squad["run_id"]
-    node = _first_encounter_node(client, rid)
+    node = _first_encounter_node(client, rid, squad["supply_id"])
     _enter_node(client, rid, squad["supply_id"], node)
     # 资源位丢弃药水的动作不存在（初始背包为空），改用重复 end_turn 幂等：
     # 战斗位用同一 request_id 结束回合两次，第二次返回首次响应
@@ -359,7 +366,8 @@ def test_chapter_bonus_enters_shared_pool_and_logged(client):
     assert any(x.get("coop_chapter_bonus", {}).get("amount") == CHAPTER_CLEAR_BONUS
                for x in won["log"])
     # 交接快照携带协作金
-    exp = client.get(f"/api/expeditions/{squad['expedition_id']}").json()
+    exp = client.get(f"/api/expeditions/{squad['expedition_id']}",
+                     params={"member_id": squad["leader_id"]}).json()
     assert exp["expedition"]["carry"]["gold"] == 50 + CHAPTER_CLEAR_BONUS
 
 
@@ -367,7 +375,7 @@ def test_ledger_records_contributions_and_chapter_split(client):
     squad = _squad(client, seed=7, chapters=2)
     rid = squad["run_id"]
     # 资源位做一次资源动作（选节点进战斗）
-    node = _first_encounter_node(client, rid)
+    node = _first_encounter_node(client, rid, squad["supply_id"])
     _enter_node(client, rid, squad["supply_id"], node)
     # 战斗位结束回合（不一定胜利，但只有胜利才记讨伐）——直接造胜
     rec = service.load_run(rid)
@@ -376,7 +384,9 @@ def test_ledger_records_contributions_and_chapter_split(client):
     _boss_or_mob_kill = client.post(f"/api/runs/{rid}/act", json={
         "action": "play",
         "card": next(h["uid"] if isinstance(h, dict) else h
-                     for h in client.get(f"/api/runs/{rid}/resume").json()["battle"]["hand"]
+                     for h in client.get(f"/api/runs/{rid}/resume",
+                                         params={"member_id": squad["combat_id"]}
+                                         ).json()["battle"]["hand"]
                      if (h["id"] if isinstance(h, dict) else h) == "strike"),
         "member_id": squad["combat_id"]})
     assert _boss_or_mob_kill.status_code == 200
@@ -384,7 +394,7 @@ def test_ledger_records_contributions_and_chapter_split(client):
     _goto_boss(client, rid, squad["supply_id"])
     _boss_kill_by(client, rid, squad["combat_id"])
 
-    t = _team(client, squad["team_id"]).json()
+    t = _team(client, squad["team_id"], squad["leader_id"]).json()
     led = {m["id"]: m["ledger"] for m in t["members"]}
     # 资源位至少 2 次后勤（选普通节点 + 选首领节点）
     assert led[squad["supply_id"]]["resource_ops"] >= 2
@@ -406,7 +416,7 @@ def test_final_win_settles_bonus_and_expedition_once(client):
     won = _boss_kill_by(client, rid, squad["leader_id"])
     assert won["run"]["status"] == "won"
     assert won["run"]["expedition"]["status"] == "won"
-    t = _team(client, squad["team_id"]).json()
+    t = _team(client, squad["team_id"], squad["leader_id"]).json()
     led = {m["id"]: m["ledger"] for m in t["members"]}
     # 终章：章节协作金 + 终胜名义金都入账（总和各 15 / 50，三人分）
     assert sum(s["chapter_bonus"] for s in led.values()) == CHAPTER_CLEAR_BONUS
@@ -443,7 +453,7 @@ def test_only_leader_advances_and_bonus_carries(client):
     assert run2["coop"]["team_id"] == squad["team_id"]
     assert {m["role"] for m in run2["coop"]["members"]} >= {LEADER, COMBAT, SUPPLY}
     # 新章的权限边界依旧生效（资源位可走节点）
-    node = _first_encounter_node(client, run2["run_id"])
+    node = _first_encounter_node(client, run2["run_id"], squad["supply_id"])
     r = _enter_node(client, run2["run_id"], squad["supply_id"], node)
     assert r.status_code == 200
 
@@ -465,12 +475,12 @@ def _lose_battle(client, rid, member_id):
 def test_battle_loss_settles_whole_team_once(client):
     squad = _squad(client, seed=9, chapters=2)
     rid = squad["run_id"]
-    node = _first_encounter_node(client, rid)
+    node = _first_encounter_node(client, rid, squad["supply_id"])
     _enter_node(client, rid, squad["supply_id"], node)
     lost = _lose_battle(client, rid, squad["combat_id"])
     assert lost["run"]["status"] == "lost"
     assert lost["run"]["expedition"]["status"] == "lost"
-    t = _team(client, squad["team_id"]).json()
+    t = _team(client, squad["team_id"], squad["leader_id"]).json()
     assert t["status"] == "started"  # 队伍记录不删除，标记来自远征状态
     kinds = [e["kind"] for e in t["events"]]
     assert kinds.count("settle") == 1
@@ -500,13 +510,15 @@ def test_invalid_business_action_rolls_back_entirely(client):
     db.save_run(rid, rec["state"]["status"], rec["state"]["position"], rec["state"])
     r = _enter_node(client, rid, squad["supply_id"], forge)
     assert r.status_code == 200
-    view = client.get(f"/api/runs/{rid}/resume").json()
+    view = client.get(f"/api/runs/{rid}/resume",
+                      params={"member_id": squad["supply_id"]}).json()
     uid = view["deck"][0]["uid"]
     r = client.post(f"/api/runs/{rid}/act", json={
         "action": "forge", "card": uid, "growth_node": "sharpen",
         "member_id": squad["supply_id"]})
     assert r.status_code == 400
-    after = client.get(f"/api/runs/{rid}/resume").json()
+    after = client.get(f"/api/runs/{rid}/resume",
+                       params={"member_id": squad["supply_id"]}).json()
     assert after["gold"] == 0
     assert after["deck"][0]["growth_nodes"] == []
     assert after["forge_claimed"] is False
@@ -557,7 +569,8 @@ def _coop_clear_chapter_legal(client, squad, rid):
         if view["in_battle"]:
             result = _coop_bot_play(client, rid, combat_id)
             if result in ("won", "lost"):
-                view = client.get(f"/api/runs/{rid}/resume").json()
+                view = client.get(f"/api/runs/{rid}/resume",
+                                  params={"member_id": supply_id}).json()
                 if view["status"] in ("won", "lost"):
                     return view["status"]
             continue
@@ -585,7 +598,8 @@ def test_coop_replay_actors_and_checkpoints_isolated(client):
     rid = squad["run_id"]
     assert _coop_clear_chapter_legal(client, squad, rid) == "won"
 
-    r = client.get(f"/api/coop/teams/{squad['team_id']}/replay")
+    r = client.get(f"/api/coop/teams/{squad['team_id']}/replay",
+                   params={"member_id": squad["leader_id"]})
     assert r.status_code == 200, r.text
     rep = r.json()
     assert rep["isolated"] is True
@@ -620,11 +634,12 @@ def test_coop_run_replay_from_carry_keeps_team_marker(client):
     adv = client.post(f"/api/coop/teams/{squad['team_id']}/advance",
                       json={"member_id": squad["leader_id"]}).json()
     rid2 = adv["run"]["run_id"]
-    node = _first_encounter_node(client, rid2)
+    node = _first_encounter_node(client, rid2, squad["supply_id"])
     _enter_node(client, rid2, squad["supply_id"], node)
     client.post(f"/api/runs/{rid2}/act",
                 json={"action": "end_turn", "member_id": squad["combat_id"]})
-    rep = client.get(f"/api/runs/{rid2}/replay").json()
+    rep = client.get(f"/api/runs/{rid2}/replay",
+                     params={"member_id": squad["leader_id"]}).json()
     v = rep["verification"]
     assert v["mismatch"] == 0 and v["error"] == 0 and v["ok"] >= 2
 

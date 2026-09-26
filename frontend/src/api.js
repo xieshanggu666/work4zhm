@@ -182,7 +182,9 @@ export const api = {
     setExpectedRev(data.rev)
     return data
   },
-  replay: (id) => j(`${BASE}/runs/${id}/replay`),
+  // 协作章节 run 的回放与 resume 同一权限边界：带成员身份（非协作局服务端忽略）
+  replay: (id) =>
+    j(`${BASE}/runs/${id}/replay${currentMemberId ? `?member_id=${encodeURIComponent(currentMemberId)}` : ''}`),
 
   // 未确认操作核对（断线恢复 2.10.1）：landed（已生效，附 seq/rev/chapter）
   // 或 unknown（未到达/被写入前校验拒绝）。协作 run 带成员身份，只读。
@@ -203,11 +205,14 @@ export const api = {
     return data
   },
   async getExpedition(id) {
-    const data = await j(`${BASE}/expeditions/${id}`)
+    // 协作远征的续局入口要求成员身份（单人远征服务端忽略该参数）
+    const suffix = currentMemberId ? `?member_id=${encodeURIComponent(currentMemberId)}` : ''
+    const data = await j(`${BASE}/expeditions/${id}${suffix}`)
     if (Number.isInteger(data.run?.rev)) setExpectedRev(data.run.rev)
     return data
   },
-  expeditionReplay: (id) => j(`${BASE}/expeditions/${id}/replay`),
+  expeditionReplay: (id) =>
+    j(`${BASE}/expeditions/${id}/replay${currentMemberId ? `?member_id=${encodeURIComponent(currentMemberId)}` : ''}`),
   async advanceExpedition(id, { retryKey } = {}) {
     // 与 run 行动同理：request_id 幂等，重复/并发提交返回首次结果，不会重复开章
     const requestId = retryKey || newRequestId()
@@ -312,5 +317,7 @@ export const api = {
     q.set('exp_seq', cursor?.exp_seq ?? 0)
     return j(`${BASE}/coop/teams/${teamId}/sync?${q.toString()}`)
   },
-  coopTeamReplay: (teamId) => j(`${BASE}/coop/teams/${teamId}/replay`),
+  // 协作整程回放：队伍时间线/个人战利/逐章回放只向本队成员下发
+  coopTeamReplay: (teamId, memberId = currentMemberId) =>
+    j(`${BASE}/coop/teams/${teamId}/replay${memberId ? `?member_id=${encodeURIComponent(memberId)}` : ''}`),
 }

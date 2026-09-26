@@ -2,8 +2,10 @@
 
 鉴权模型：本服务无独立账号体系，成员身份用「入会时拿到的成员 id」表达
 （令牌只在加入/建队响应里下发一次，客户端自行保存）。写动作一律带
-member_id，服务端在任何状态变更之前核验成员归属与角色权限边界：
-- 越权（非队长做管理/角色不符做章节动作）-> 403 且零副作用；
+member_id，服务端在任何状态变更之前核验成员归属与角色权限边界；读接口
+（队伍视口/续局/同步/回放）同样先核验成员归属再下发任何数据——队伍状态、
+行动记录与成员贡献绝不向队外泄露：
+- 越权（非成员读视口、非队长做管理、角色不符做章节动作）-> 403 且零副作用；
 - 状态过期/重复开赛/重复推进 -> 409；
 - 入队码非法/人数不足等业务校验 -> 400。
 """
@@ -50,8 +52,8 @@ def join_team(body: JoinCoopTeamRequest):
 def get_team(team_id: str, member_id: str | None = None):
     try:
         return service.get_coop_team(team_id, member_id=member_id)
-    except service.InvalidAction as e:
-        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:  # 权限（403）/非法（400）统一映射
+        _http_error(e)
 
 
 @router.post("/teams/{team_id}/roles")
@@ -101,8 +103,8 @@ def advance_team(team_id: str, body: CoopAdvanceRequest):
 def get_team_expedition(team_id: str, member_id: str | None = None):
     try:
         return service.get_coop_expedition(team_id, member_id=member_id)
-    except service.InvalidAction as e:
-        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:  # 权限（403）/非法（400）统一映射
+        _http_error(e)
 
 
 @router.get("/teams/{team_id}/sync")
@@ -123,8 +125,8 @@ def sync_team(team_id: str, member_id: str | None = None, run_id: str | None = N
 
 
 @router.get("/teams/{team_id}/replay")
-def team_replay(team_id: str):
+def team_replay(team_id: str, member_id: str | None = None):
     try:
-        return service.coop_team_replay(team_id)
-    except service.InvalidAction as e:
-        raise HTTPException(status_code=400, detail=str(e))
+        return service.coop_team_replay(team_id, member_id=member_id)
+    except Exception as e:  # 权限（403）/非法（400）统一映射
+        _http_error(e)

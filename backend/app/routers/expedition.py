@@ -15,9 +15,12 @@ def create_expedition(body: CreateExpeditionRequest):
 
 
 @router.get("/{exp_id}")
-def get_expedition(exp_id: str):
+def get_expedition(exp_id: str, member_id: str | None = None):
     try:
-        return service.get_expedition(exp_id)
+        return service.get_expedition(exp_id, member_id=member_id)
+    except service.PermissionDenied as e:
+        # 协作远征：非本队成员查看远征视口 -> 403（零副作用）
+        raise HTTPException(status_code=403, detail=str(e))
     except service.InvalidAction as e:
         raise HTTPException(status_code=400, detail=str(e))
 
@@ -41,8 +44,11 @@ def advance(exp_id: str, body: AdvanceRequest):
 
 
 @router.get("/{exp_id}/replay")
-def expedition_replay(exp_id: str):
+def expedition_replay(exp_id: str, member_id: str | None = None):
     try:
-        return service.expedition_replay(exp_id)
+        return service.expedition_replay(exp_id, member_id=member_id)
+    except service.PermissionDenied as e:
+        # 协作远征：非本队成员查看整程回放 -> 403（零副作用）
+        raise HTTPException(status_code=403, detail=str(e))
     except service.InvalidAction as e:
         raise HTTPException(status_code=400, detail=str(e))

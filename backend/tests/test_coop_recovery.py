@@ -35,7 +35,7 @@ def test_unknown_request_can_be_safely_resubmitted(client):
     # 资源位走到商店/节点：先选一个普通战斗节点（choose_node 无扣款，
     # 这里验证补交路径）——直接用一个 forge 意图验证幂等落账更直接：
     # 先让队伍走到锻造节点成本高，这里用 end_turn（战斗位）覆盖补交主路径
-    node = _first_encounter_node(client, rid)
+    node = _first_encounter_node(client, rid, squad["supply_id"])
     enter = _act(client, rid, squad["supply_id"], "choose_node", node=node)
     assert enter.status_code == 200
 
@@ -119,7 +119,7 @@ def test_probe_chapter_anchors_isolate_old_chapter(client):
     """核对结果带 chapter：客户端据此隔离旧章节、不向新章补交旧意图。"""
     squad = _squad(client, seed=33, chapters=2)
     tid, rid = squad["team_id"], squad["run_id"]
-    node = _first_encounter_node(client, rid)
+    node = _first_encounter_node(client, rid, squad["supply_id"])
     _act(client, rid, squad["supply_id"], "choose_node", node=node,
          request_id="rec-old-n")
     p = _probe(client, rid, "rec-old-n", squad["supply_id"]).json()
@@ -129,7 +129,8 @@ def test_probe_chapter_anchors_isolate_old_chapter(client):
     from tests.test_coop_sync import _bot_play
     _bot_play(client, rid, squad["combat_id"])
     for _ in range(30):
-        view = client.get(f"/api/runs/{rid}/resume").json()
+        view = client.get(f"/api/runs/{rid}/resume",
+                          params={"member_id": squad["supply_id"]}).json()
         if view["status"] != "in_progress":
             break
         if view["in_battle"]:
@@ -143,7 +144,9 @@ def test_probe_chapter_anchors_isolate_old_chapter(client):
             break
         pick = next((n for n in reach if n["type"] == "boss"), reach[0])
         _act(client, rid, squad["supply_id"], "choose_node", node=pick["id"])
-    assert client.get(f"/api/runs/{rid}/resume").json()["status"] == "won"
+    assert client.get(f"/api/runs/{rid}/resume",
+                      params={"member_id": squad["leader_id"]}
+                      ).json()["status"] == "won"
     adv = client.post(f"/api/coop/teams/{tid}/advance",
                       json={"member_id": squad["leader_id"]})
     assert adv.status_code == 200

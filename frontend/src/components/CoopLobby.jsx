@@ -130,10 +130,13 @@ export default function CoopLobby({ onEnterRun }) {
     try {
       const ident = loadIdentity()
       const mid = ident && ident.teamId === id ? ident.memberId : null
-      if (mid) {
-        setMemberId(mid)
-        setCurrentMemberId(mid)
+      if (!mid) {
+        // 队伍视口只向本队成员下发：本机没有该队身份时不必再请求
+        setErr('本机没有该队伍的成员身份：请用入队码加入，或点「恢复我的队员身份」。')
+        return
       }
+      setMemberId(mid)
+      setCurrentMemberId(mid)
       const data = await api.getCoopTeam(id, mid)
       setMode('lobby')
       applyTeam(data, mid)
@@ -249,7 +252,7 @@ export default function CoopLobby({ onEnterRun }) {
         <div className="fieldrow coop-resume">
           <span>队伍 ID</span>
           <input value={resumeTeam} onChange={(e) => setResumeTeam(e.target.value)}
-                 placeholder="粘贴 team_id 查看/续队" />
+                 placeholder="粘贴 team_id 续队（需本机已保存成员身份）" />
           <button onClick={openExistingTeam} disabled={busy || !resumeTeam}>进入队伍</button>
         </div>
         {err && <div className="error">{err}</div>}

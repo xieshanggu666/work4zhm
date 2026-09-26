@@ -66,8 +66,9 @@ def _act(client, rid, member_id, action, **kw):
     return client.post(f"/api/runs/{rid}/act", json=body)
 
 
-def _first_encounter_node(client, rid):
-    view = client.get(f"/api/runs/{rid}/resume").json()
+def _first_encounter_node(client, rid, member_id):
+    view = client.get(f"/api/runs/{rid}/resume",
+                      params={"member_id": member_id}).json()
     return next(n["id"] for n in view["reachable"] if n["type"] == "encounter")
 
 
@@ -154,7 +155,7 @@ def test_sync_incremental_actions_carry_recorded_frames(client):
     assert cursor["rev"] == entry["run"]["rev"]
 
     # 资源位进战斗节点，战斗位打一个回合（各自带 request_id）
-    node = _first_encounter_node(client, rid)
+    node = _first_encounter_node(client, rid, squad["leader_id"])
     r1 = _act(client, rid, squad["supply_id"], "choose_node", node=node,
               request_id="sync-n1")
     assert r1.status_code == 200
@@ -179,7 +180,8 @@ def test_sync_incremental_actions_carry_recorded_frames(client):
     # 增量非空时附最新权威视口，且与 resume 全量一致
     assert data["run"]["in_battle"] is True
     assert data["run"]["rev"] == data["cursor"]["rev"]
-    fresh = client.get(f"/api/runs/{rid}/resume").json()
+    fresh = client.get(f"/api/runs/{rid}/resume",
+                      params={"member_id": squad["leader_id"]}).json()
     assert data["run"]["battle"]["turn"] == fresh["battle"]["turn"]
     assert data["run"]["health"] == fresh["health"]
     # 游标推进到最新；再同步无增量
@@ -203,7 +205,7 @@ def test_sync_frames_match_replay_steps(client):
     """整段打完一章：增量同步的录制帧与整局回放推演帧逐条一致。"""
     squad = _squad(client, seed=13, chapters=2)
     tid, rid = squad["team_id"], squad["run_id"]
-    node = _first_encounter_node(client, rid)
+    node = _first_encounter_node(client, rid, squad["leader_id"])
     _act(client, rid, squad["supply_id"], "choose_node", node=node)
     _bot_play(client, rid, squad["combat_id"])
 
@@ -214,7 +216,8 @@ def test_sync_frames_match_replay_steps(client):
     assert actions[0]["action"] == "create" and actions[0]["log"] == []
     assert all(not a["replay_only"] for a in actions)
 
-    rep = client.get(f"/api/runs/{rid}/replay").json()
+    rep = client.get(f"/api/runs/{rid}/replay",
+                    params={"member_id": squad["combat_id"]}).json()
     assert rep["verification"]["final_match"] is True
     assert rep["verification"]["frame_mismatch"] == 0
     steps = rep["steps"]
@@ -233,11 +236,12 @@ def test_replay_frame_dimension_on_new_and_legacy_logs(client):
     """回放 frame 维度：2.10.0 新日志逐帧比对；无录制帧的旧日志跳过。"""
     squad = _squad(client, seed=17, chapters=2)
     rid = squad["run_id"]
-    node = _first_encounter_node(client, rid)
+    node = _first_encounter_node(client, rid, squad["leader_id"])
     _act(client, rid, squad["supply_id"], "choose_node", node=node)
     _act(client, rid, squad["combat_id"], "end_turn")
 
-    rep = client.get(f"/api/runs/{rid}/replay").json()
+    rep = client.get(f"/api/runs/{rid}/replay",
+                    params={"member_id": squad["combat_id"]}).json()
     frames = {c["seq"]: c["frame"] for c in rep["verification"]["checks"]}
     # create 无录制帧；其余动作全部逐帧一致
     assert frames[1] is None
@@ -261,7 +265,8 @@ def test_replay_frame_dimension_on_new_and_legacy_logs(client):
         conn.commit()
     finally:
         conn.close()
-    rep2 = client.get(f"/api/runs/{rid}/replay").json()
+    rep2 = client.get(f"/api/runs/{rid}/replay",
+                    params={"member_id": squad["combat_id"]}).json()
     frames2 = {c["seq"]: c["frame"] for c in rep2["verification"]["checks"]}
     assert all(f is None for f in frames2.values())
     assert rep2["verification"]["mismatch"] == 0
@@ -285,12 +290,13 @@ def test_sync_reset_on_first_connect_and_chapter_change(client):
     assert first["run"]["coop"]["team_id"] == tid
 
     # 打通第 1 章并由队长推进：旧游标同步 -> reset 到新章
-    node = _first_encounter_node(client, rid)
+    node = _first_encounter_node(client, rid, squad["leader_id"])
     _act(client, rid, squad["supply_id"], "choose_node", node=node)
     _bot_play(client, rid, squad["combat_id"])
     # 直接走到首领（资源位合法选路）
     for _ in range(30):
-        view = client.get(f"/api/runs/{rid}/resume").json()
+        view = client.get(f"/api/runs/{rid}/resume",
+                      params={"member_id": squad["leader_id"]}).json()
         if view["status"] != "in_progress":
             break
         if view["in_battle"]:
@@ -306,7 +312,8 @@ def test_sync_reset_on_first_connect_and_chapter_change(client):
         pick = boss or reach[0]
         r = _act(client, rid, squad["supply_id"], "choose_node", node=pick["id"])
         assert r.status_code == 200
-    view = client.get(f"/api/runs/{rid}/resume").json()
+    view = client.get(f"/api/runs/{rid}/resume",
+                      params={"member_id": squad["leader_id"]}).json()
     assert view["status"] == "won"
     adv = client.post(f"/api/coop/teams/{tid}/advance",
                       json={"member_id": squad["leader_id"]})
@@ -336,7 +343,7 @@ def test_sync_reset_when_cursor_ahead_or_too_far_behind(client, monkeypatch):
     # 落后过多（超过 SYNC_ACTION_LIMIT 条未同步）-> reset 全量对齐
     # （调低上限，避免为构造场景打几十回合战斗）
     monkeypatch.setattr("app.coop.SYNC_ACTION_LIMIT", 3)
-    node = _first_encounter_node(client, rid)
+    node = _first_encounter_node(client, rid, squad["leader_id"])
     _act(client, rid, squad["supply_id"], "choose_node", node=node)
     for _ in range(4):
         r = _act(client, rid, squad["combat_id"], "end_turn")
@@ -360,7 +367,7 @@ def test_conflict_then_incremental_catchup_then_retry(client):
     stale_rev = entry["run"]["rev"]
 
     # 资源位推进路线（战斗位视角里状态已过期）
-    node = _first_encounter_node(client, rid)
+    node = _first_encounter_node(client, rid, squad["leader_id"])
     r1 = _act(client, rid, squad["supply_id"], "choose_node", node=node)
     assert r1.status_code == 200
 
@@ -391,7 +398,8 @@ def test_conflict_then_incremental_catchup_then_retry(client):
     actions = [e for e in db.load_events(rid) if e["action"] == "end_turn"]
     assert len(actions) == 1
     # 追平后回放逐帧一致
-    rep = client.get(f"/api/runs/{rid}/replay").json()
+    rep = client.get(f"/api/runs/{rid}/replay",
+                    params={"member_id": squad["combat_id"]}).json()
     assert rep["verification"]["final_match"] is True
     assert rep["verification"]["frame_mismatch"] == 0
 
@@ -404,15 +412,17 @@ def test_sync_after_team_settled(client):
                        params={"member_id": squad["leader_id"]}).json()
     cursor = entry["cursor"]
     # 进战斗后连续空过直到战败
-    node = _first_encounter_node(client, rid)
+    node = _first_encounter_node(client, rid, squad["leader_id"])
     _act(client, rid, squad["supply_id"], "choose_node", node=node)
     for _ in range(60):
-        view = client.get(f"/api/runs/{rid}/resume").json()
+        view = client.get(f"/api/runs/{rid}/resume",
+                      params={"member_id": squad["leader_id"]}).json()
         if view["status"] != "in_progress":
             break
         r = _act(client, rid, squad["combat_id"], "end_turn")
         assert r.status_code == 200
-    view = client.get(f"/api/runs/{rid}/resume").json()
+    view = client.get(f"/api/runs/{rid}/resume",
+                      params={"member_id": squad["leader_id"]}).json()
     assert view["status"] == "lost"
 
     # 战败后其他成员同步：拿到剩余动作增量 + 队伍 settle 事件，游标到终态
@@ -426,6 +436,7 @@ def test_sync_after_team_settled(client):
     # 终态视口随增量下发（与 resume 一致）
     assert data["run"]["status"] == "lost"
     # 回放仍逐帧一致（含战败结算帧）
-    rep = client.get(f"/api/runs/{rid}/replay").json()
+    rep = client.get(f"/api/runs/{rid}/replay",
+                    params={"member_id": squad["combat_id"]}).json()
     assert rep["verification"]["final_match"] is True
     assert rep["verification"]["frame_mismatch"] == 0

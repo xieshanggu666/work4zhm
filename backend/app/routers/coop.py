@@ -1,9 +1,11 @@
 """多人协作远征（2.9.0）路由：队伍大厅 / 开赛 / 推进 / 整程回放。
 
 鉴权模型：本服务无独立账号体系，成员身份用「入会时拿到的成员 id」表达
-（令牌只在加入/建队响应里下发一次，客户端自行保存）。写动作一律带
-member_id，服务端在任何状态变更之前核验成员归属与角色权限边界：
-- 越权（非队长做管理/角色不符做章节动作）-> 403 且零副作用；
+（令牌只在加入/建队响应里下发一次，客户端自行保存）。所有携带队伍数据的
+接口（含查询：队伍视口/续局/同步/整程回放）一律带 member_id，服务端在
+任何状态下发或变更之前核验成员归属与角色权限边界：
+- 越权（非本队成员/未带身份查队内数据，或非队长做管理、角色不符做章节
+  动作）-> 403 且零副作用；
 - 状态过期/重复开赛/重复推进 -> 409；
 - 入队码非法/人数不足等业务校验 -> 400。
 """
@@ -50,6 +52,8 @@ def join_team(body: JoinCoopTeamRequest):
 def get_team(team_id: str, member_id: str | None = None):
     try:
         return service.get_coop_team(team_id, member_id=member_id)
+    except service.PermissionDenied as e:
+        raise HTTPException(status_code=403, detail=str(e))
     except service.InvalidAction as e:
         raise HTTPException(status_code=400, detail=str(e))
 
@@ -101,6 +105,8 @@ def advance_team(team_id: str, body: CoopAdvanceRequest):
 def get_team_expedition(team_id: str, member_id: str | None = None):
     try:
         return service.get_coop_expedition(team_id, member_id=member_id)
+    except service.PermissionDenied as e:
+        raise HTTPException(status_code=403, detail=str(e))
     except service.InvalidAction as e:
         raise HTTPException(status_code=400, detail=str(e))
 
@@ -123,8 +129,10 @@ def sync_team(team_id: str, member_id: str | None = None, run_id: str | None = N
 
 
 @router.get("/teams/{team_id}/replay")
-def team_replay(team_id: str):
+def team_replay(team_id: str, member_id: str | None = None):
     try:
-        return service.coop_team_replay(team_id)
+        return service.coop_team_replay(team_id, member_id=member_id)
+    except service.PermissionDenied as e:
+        raise HTTPException(status_code=403, detail=str(e))
     except service.InvalidAction as e:
         raise HTTPException(status_code=400, detail=str(e))

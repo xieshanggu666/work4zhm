@@ -11,7 +11,12 @@ let expectedRev = null
 
 // 多人协作远征（2.9.0）：当前队伍成员身份（入会响应里的 me.id）。协作章节 run
 // 的每个动作都带 member_id，服务端据此做角色权限边界（越权 403、零副作用）。
+// 查询接口（队伍视口/续局/回放/同步）同样必带——非本队成员拿不到队内数据。
 let currentMemberId = null
+
+// 协作查询的身份查询串：单人局无身份时为空（服务端忽略 member_id）
+const memberSuffix = () =>
+  currentMemberId ? `?member_id=${encodeURIComponent(currentMemberId)}` : ''
 
 // 协作增量同步（2.10.0）：客户端游标，锚定三条日志的已读位置
 // （章节 run 动作日志 run_seq / 队伍时间线 team_seq / 远征事件 exp_seq）。
@@ -178,11 +183,11 @@ export const api = {
     return data
   },
   async resume(id) {
-    const data = await j(`${BASE}/runs/${id}/resume${currentMemberId ? `?member_id=${encodeURIComponent(currentMemberId)}` : ''}`)
+    const data = await j(`${BASE}/runs/${id}/resume${memberSuffix()}`)
     setExpectedRev(data.rev)
     return data
   },
-  replay: (id) => j(`${BASE}/runs/${id}/replay`),
+  replay: (id) => j(`${BASE}/runs/${id}/replay${memberSuffix()}`),
 
   // 未确认操作核对（断线恢复 2.10.1）：landed（已生效，附 seq/rev/chapter）
   // 或 unknown（未到达/被写入前校验拒绝）。协作 run 带成员身份，只读。
@@ -203,11 +208,11 @@ export const api = {
     return data
   },
   async getExpedition(id) {
-    const data = await j(`${BASE}/expeditions/${id}`)
+    const data = await j(`${BASE}/expeditions/${id}${memberSuffix()}`)
     if (Number.isInteger(data.run?.rev)) setExpectedRev(data.run.rev)
     return data
   },
-  expeditionReplay: (id) => j(`${BASE}/expeditions/${id}/replay`),
+  expeditionReplay: (id) => j(`${BASE}/expeditions/${id}/replay${memberSuffix()}`),
   async advanceExpedition(id, { retryKey } = {}) {
     // 与 run 行动同理：request_id 幂等，重复/并发提交返回首次结果，不会重复开章
     const requestId = retryKey || newRequestId()
@@ -312,5 +317,6 @@ export const api = {
     q.set('exp_seq', cursor?.exp_seq ?? 0)
     return j(`${BASE}/coop/teams/${teamId}/sync?${q.toString()}`)
   },
-  coopTeamReplay: (teamId) => j(`${BASE}/coop/teams/${teamId}/replay`),
+  coopTeamReplay: (teamId) =>
+    j(`${BASE}/coop/teams/${teamId}/replay${memberSuffix()}`),
 }

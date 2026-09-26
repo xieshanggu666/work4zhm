@@ -490,12 +490,17 @@ def create_expedition(seed=None, chapters=None):
     }
 
 
-def get_expedition(exp_id):
-    """远征视口 + 当前章节 run 视口（续远征入口）。"""
+def get_expedition(exp_id, member_id=None):
+    """远征视口 + 当前章节 run 视口（续远征入口）。
+
+    协作远征按队成员身份核验（在 resume 内、任何视口构造之前，越权 403）；
+    单人远征忽略 member_id。
+    """
     exp = db.load_expedition(exp_id)
     if exp is None:
         raise InvalidAction("expedition not found")
-    return {"expedition": _expedition_view(exp), "run": resume(exp["current_run_id"])}
+    return {"expedition": _expedition_view(exp),
+            "run": resume(exp["current_run_id"], member_id=member_id)}
 
 
 def advance_expedition(exp_id, request_id=None, member_id=None):
@@ -915,17 +920,26 @@ def _sync_expedition_conn(conn, exp_id, run_rec, run):
             "chapter": row["chapter"], "chapters_total": row["chapters_total"]}
 
 
-def expedition_replay(exp_id):
+def expedition_replay(exp_id, member_id=None):
     """整程回放：远征事件时间线 + 逐章完整回放（每章复用单局可交互回放）。
 
     全程只读：不写 runs/battle_events/profile/expeditions，战败章节不发解锁。
+    协作远征的动作记录含操作者与共享决策：按队成员身份核验（越权 403），
+    单人远征无队伍标记，member_id 不影响（run_id/exp_id 即能力凭据）。
     """
     exp = db.load_expedition(exp_id)
     if exp is None:
         raise InvalidAction("expedition not found")
+    team_id = exp.get("coop_team_id")
+    if team_id:
+        conn = db.get_conn()
+        try:
+            _require_team_member_conn(conn, team_id, member_id)
+        finally:
+            conn.close()
     chapters = []
     for r in db.list_expedition_runs(exp_id):
-        rep = replay(r["run_id"])
+        rep = replay(r["run_id"], member_id=member_id, _team_id=team_id)
         chapters.append({
             "chapter": r["chapter"],
             "run_id": r["run_id"],
@@ -1138,14 +1152,18 @@ def join_coop_team(code, member_name, request_id=None):
 
 
 def get_coop_team(team_id, member_id=None):
-    """队伍视口（大厅轮询/赛后查看）：成员列表、角色、个人战利、时间线。"""
+    """队伍视口（大厅轮询/赛后查看）：成员列表、角色、个人战利、时间线。
+
+    视口包含成员名册与个人贡献流水，属队内共享状态：任何数据下发之前先核验
+    成员归属（member_id 缺失/伪造/他队成员 -> 403），与写动作、sync 同源。
+    """
     with db.run_lock(f"coop:{team_id}"):
         with db.transaction() as conn:
             team = db.load_coop_team_conn(conn, team_id)
             if team is None:
                 raise InvalidAction("team not found")
-            # 携带 member_id 时仅用于高亮“我”，不作为硬鉴权（大厅分享链接可读）
-            return _team_view_conn(conn, team, me_id=member_id)
+            member = _require_team_member_conn(conn, team_id, member_id)
+            return _team_view_conn(conn, team, me_id=member["id"])
 
 
 def assign_role(team_id, member_id, target_id, role, request_id=None):
@@ -1313,20 +1331,23 @@ def get_coop_expedition(team_id, member_id=None):
             team = db.load_coop_team_conn(conn, team_id)
             if team is None:
                 raise InvalidAction("team not found")
+            # 成员归属先于任何视口下发（未带身份/伪造/他队成员 -> 403）：
+            # 视口含成员名册、个人贡献与章节 run 全量状态，绝不向队外泄露
+            member = _require_team_member_conn(conn, team_id, member_id)
             if not team.get("expedition_id"):
                 # 尚未开赛：只返回大厅视口
-                return {"team": _team_view_conn(conn, team, me_id=member_id),
+                return {"team": _team_view_conn(conn, team, me_id=member["id"]),
                         "expedition": None, "run": None,
                         "cursor": _coop_cursor_conn(conn, team, None, None)}
             exp = db.load_expedition(team["expedition_id"])
             if exp is None:
                 raise InvalidAction("expedition not found")
             current_run_id = exp["current_run_id"]
-            team_view = _team_view_conn(conn, team, me_id=member_id)
+            team_view = _team_view_conn(conn, team, me_id=member["id"])
             expedition_view = _expedition_view(exp)
             cursor = _coop_cursor_conn(conn, team, exp, current_run_id)
         # 事务已提交：resume 走它自己的迁移事务（coop 摘要在其中构造）
-        run_view = resume(current_run_id, member_id=member_id)
+        run_view = resume(current_run_id, member_id=member["id"])
         return {"team": team_view, "expedition": expedition_view, "run": run_view,
                 "cursor": cursor}
 
@@ -1537,11 +1558,14 @@ def _sync_coop_conn(conn, member, rec, run, action, action_body, log, ended_befo
     return _coop_badge_conn(conn, team, me_id=member["id"])
 
 
-def coop_team_replay(team_id):
+def coop_team_replay(team_id, member_id=None):
     """协作远征整程回放：队伍时间线（含个人战利）+ 远征事件 + 逐章可交互回放。
 
     复用 expedition_replay 的逐章重建（校验点逐位比对），并在每一步上叠加
     battle_events 里记录的 actor（操作者）；全程只读，不写任何存档/不发解锁。
+
+    回放包含全员名册、个人贡献流水与逐帧动作记录：先核验成员归属（未带身份/
+    伪造/他队成员 -> 403），再做只读重建。
     """
     team_rec = db.load_coop_team(team_id)
     if team_rec is None:
@@ -1549,6 +1573,7 @@ def coop_team_replay(team_id):
     # 只读连接：整程回放绝不开启写事务（与 expedition_replay 的只读隔离一致）
     conn = db.get_conn()
     try:
+        _require_team_member_conn(conn, team_id, member_id)
         members = db.list_coop_members_conn(conn, team_id)
         ledger_rows = db.list_coop_ledger_conn(conn, team_id)
     finally:
@@ -1560,7 +1585,8 @@ def coop_team_replay(team_id):
     exp = None
     if team_rec.get("expedition_id"):
         exp = db.load_expedition(team_rec["expedition_id"])
-        exp_replay = expedition_replay(team_rec["expedition_id"])
+        exp_replay = expedition_replay(team_rec["expedition_id"],
+                                       member_id=member_id)
         # 把每一步的操作者标注到章节回放帧上（只读派生，不改底层结构）
         for ch in exp_replay.get("chapters", []):
             for step in ch["replay"].get("steps", []):
@@ -2828,16 +2854,21 @@ def resume(run_id, member_id=None):
                 exp = db.load_expedition(row["expedition_id"])
                 if exp is not None:
                     exp_badge = _exp_badge(exp)
-                    # 2.9.0 协作远征：携带队伍摘要与本成员的权限边界（读接口，
-                    # member_id 仅用于高亮“我是谁”，不做硬鉴权；写动作才鉴权）
+                    # 2.9.0 协作远征：视口携带队伍摘要与本成员的权限边界。
+                    # 查询与写动作同源鉴权——run 全量状态（含队伍成员/共享金币/
+                    # 决策时间线）在成员归属核验通过后才下发（越权 403、零副作用）
                     team_id = exp.get("coop_team_id") or state.get("coop_team")
                     if team_id:
+                        member = _require_team_member_conn(conn, team_id, member_id)
                         team = db.load_coop_team_conn(conn, team_id)
                         if team is not None:
                             members = db.list_coop_members_conn(conn, team_id)
                             coop_badge_view = coop_mod.coop_badge(
                                 team, members, exp["chapter"], exp["chapters_total"],
-                                exp["status"], me_id=member_id)
+                                exp["status"], me_id=member["id"])
+            elif state.get("coop_team"):
+                # 协作章节 run（历史档无远征指针时）：仍须核验成员归属
+                _require_team_member_conn(conn, state["coop_team"], member_id)
             return _public_view(state, map_data, run_id, rev=rev, expedition=exp_badge,
                                 coop=coop_badge_view)
 
@@ -3055,7 +3086,7 @@ def _legacy_offer_for_accept(run_rec, sku, fixed_chapter, chapters_total, exp_id
     }
 
 
-def replay(run_id):
+def replay(run_id, member_id=None, _team_id=None):
     """整局可交互回放。
 
     从“建局初始状态”开始，按动作日志逐步调用与在线完全相同的纯推演函数
@@ -3067,10 +3098,21 @@ def replay(run_id):
     校验：每步与日志记录的 ckpt 哈希比对；旧日志（无 ckpt/无 ver）标记 legacy
     并跳过校验。整个回放只读内存与已持久化的日志，不写 runs/battle_events/profile，
     战败不触发解锁奖励。
+
+    协作 run 的逐帧动作记录含操作者与共享决策：回放前核验成员归属（越权
+    403）；_team_id 由整程回放透传（避免逐章回查远征），缺省时取状态里的
+    coop_team。单人 run 无队伍标记，不做此校验。
     """
     rec = load_run(run_id)
     if rec is None:
         raise InvalidAction("run not found")
+    team_id = _team_id or rec["state"].get("coop_team")
+    if team_id:
+        conn = db.get_conn()
+        try:
+            _require_team_member_conn(conn, team_id, member_id)
+        finally:
+            conn.close()
     seed = rec["state"]["seed"]
     map_data = rec["map"]
     # 只读已持久化日志：经共享连接读取，保证读到的都是已提交事务
